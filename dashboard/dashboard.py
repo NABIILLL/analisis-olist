@@ -136,7 +136,10 @@ with st.sidebar:
     )
     st.divider()
     st.caption("Sumber: Brazilian E-Commerce Public Dataset by Olist")
-    st.caption("Nilai moneter menggunakan Brazilian Real (BRL).")
+    st.caption(
+        "Nilai moneter menggunakan BRL. Total penjualan memakai nilai pembayaran "
+        "(termasuk ongkir); kategori memakai harga item (tanpa ongkir)."
+    )
 
 if isinstance(selected_dates, tuple) and len(selected_dates) == 2:
     start_date, end_date = selected_dates
@@ -246,11 +249,11 @@ with trend_col:
     ax.set_axisbelow(True)
     for spine in ax.spines.values():
         spine.set_color("#475569")
-    st.pyplot(fig, use_container_width=True)
+    st.pyplot(fig, width="stretch")
     plt.close(fig)
 with category_col:
     st.markdown(
-        '<div class="chart-title">Top 10 Kategori berdasarkan Penjualan</div>',
+        '<div class="chart-title">Top 10 Kategori berdasarkan Nilai Item</div>',
         unsafe_allow_html=True,
     )
     top_categories = category_sales.head(10).sort_values("revenue", ascending=False)
@@ -270,7 +273,7 @@ with category_col:
     ax.set_axisbelow(True)
     for spine in ax.spines.values():
         spine.set_color("#475569")
-    st.pyplot(fig, use_container_width=True)
+    st.pyplot(fig, width="stretch")
     plt.close(fig)
 
 st.markdown('<div class="section-title">Insight Otomatis</div>', unsafe_allow_html=True)
@@ -308,4 +311,4 @@ display_categories = display_categories.rename(
         "items": "Jumlah Item",
     }
 )
-st.dataframe(display_categories, use_container_width=True, hide_index=True)
+st.dataframe(display_categories, width="stretch", hide_index=True)
