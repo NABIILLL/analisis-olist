@@ -1,1 +1,1 @@
-# Isi dengan URL dashboard setelah deployment.
+https://list-analytics-bynabil.streamlit.app/
