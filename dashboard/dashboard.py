@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -107,21 +108,37 @@ def load_data():
     items = pd.read_csv(DATA_DIR / "order_items_dataset.csv")
     products = pd.read_csv(DATA_DIR / "products_dataset.csv")
     translation = pd.read_csv(DATA_DIR / "product_category_name_translation.csv")
-    return orders, payments, items, products, translation
+    customers = pd.read_csv(DATA_DIR / "customers_dataset.csv")
+    reviews = pd.read_csv(DATA_DIR / "order_reviews_dataset.csv")
+    return orders, payments, items, products, translation, customers, reviews
 
 
 def format_brl(value):
     return f"R$ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
-orders, payments, items, products, translation = load_data()
+(
+    orders,
+    payments,
+    items,
+    products,
+    translation,
+    customers,
+    reviews,
+) = load_data()
+
+PERIOD_START = pd.Timestamp("2016-09-01")
+PERIOD_END = pd.Timestamp("2018-08-31 23:59:59")
+orders = orders[
+    orders["order_purchase_timestamp"].between(PERIOD_START, PERIOD_END)
+].copy()
 orders["month"] = orders["order_purchase_timestamp"].dt.to_period("M").astype(str)
 
 with st.sidebar:
     st.markdown("## 🛍️ Olist Analytics")
     st.caption("Gunakan filter untuk mengeksplorasi performa bisnis.")
-    min_date = orders["order_purchase_timestamp"].min().date()
-    max_date = orders["order_purchase_timestamp"].max().date()
+    min_date = PERIOD_START.date()
+    max_date = PERIOD_END.date()
     selected_dates = st.date_input(
         "Periode pesanan",
         value=(min_date, max_date),
@@ -137,8 +154,8 @@ with st.sidebar:
     st.divider()
     st.caption("Sumber: Brazilian E-Commerce Public Dataset by Olist")
     st.caption(
-        "Nilai moneter menggunakan BRL. Total penjualan memakai nilai pembayaran "
-        "(termasuk ongkir); kategori memakai harga item (tanpa ongkir)."
+        "Periode default mengikuti notebook: September 2016–Agustus 2018. "
+        "Nilai penjualan menggunakan harga item (tanpa ongkir)."
     )
 
 if isinstance(selected_dates, tuple) and len(selected_dates) == 2:
@@ -167,22 +184,43 @@ filtered_items = filtered_items.merge(
 filtered_items["category"] = filtered_items["product_category_name_english"].fillna(
     filtered_items["product_category_name"]
 ).fillna("Unknown")
+filtered_items["month"] = filtered_items["order_id"].map(
+    filtered_orders.set_index("order_id")["month"]
+)
 
 total_orders = filtered_orders["order_id"].nunique()
-total_revenue = filtered_payments["payment_value"].sum()
+total_revenue = filtered_items["price"].sum()
 average_order_value = (
-    filtered_payments.groupby("order_id")["payment_value"].sum().mean()
+    filtered_items.groupby("order_id")["price"].sum().mean()
     if total_orders
     else 0
 )
-delivered_orders = filtered_orders[
-    filtered_orders["order_delivered_customer_date"].notna()
-]
-late_orders = delivered_orders[
-    delivered_orders["order_delivered_customer_date"]
-    > delivered_orders["order_estimated_delivery_date"]
-]
-late_rate = len(late_orders) / len(delivered_orders) * 100 if len(delivered_orders) else 0
+reviews_by_order = reviews.groupby("order_id", as_index=False)["review_score"].mean()
+delivery_analysis = (
+    filtered_orders.merge(reviews_by_order, on="order_id", how="inner")
+    .merge(customers[["customer_id", "customer_state"]], on="customer_id", how="left")
+    .dropna(
+        subset=[
+            "order_delivered_customer_date",
+            "order_estimated_delivery_date",
+            "review_score",
+        ]
+    )
+)
+delivery_analysis["delivery_delay"] = (
+    delivery_analysis["order_delivered_customer_date"]
+    - delivery_analysis["order_estimated_delivery_date"]
+).dt.days
+delivery_analysis["is_late"] = delivery_analysis["delivery_delay"] > 0
+delivery_analysis["month"] = delivery_analysis[
+    "order_purchase_timestamp"
+].dt.to_period("M").astype(str)
+late_orders = delivery_analysis[delivery_analysis["is_late"]]
+late_rate = (
+    delivery_analysis["is_late"].mean() * 100
+    if not delivery_analysis.empty
+    else 0
+)
 
 st.markdown(
     """
@@ -207,24 +245,19 @@ kpi_3.metric("Rata-rata Nilai Pesanan", format_brl(average_order_value))
 kpi_4.metric("Tingkat Keterlambatan", f"{late_rate:.2f}%")
 
 st.markdown('<div class="section-title">Ringkasan Performa</div>', unsafe_allow_html=True)
-monthly = (
-    filtered_orders.groupby("month")
-    .agg(orders=("order_id", "nunique"))
-    .join(
-        filtered_payments.groupby(
-            filtered_payments["order_id"].map(
-                filtered_orders.set_index("order_id")["month"]
-            )
-        )["payment_value"].sum().rename("revenue"),
-        how="left",
-    )
-    .fillna(0)
-)
+monthly = filtered_items.groupby("month").agg(
+    orders=("order_id", "nunique"),
+    revenue=("price", "sum"),
+).fillna(0)
 monthly.index.name = "Bulan"
 
 category_sales = (
     filtered_items.groupby("category", as_index=False)
-    .agg(revenue=("price", "sum"), items=("order_id", "count"))
+    .agg(
+        revenue=("price", "sum"),
+        orders=("order_id", "nunique"),
+        items=("order_id", "count"),
+    )
     .sort_values("revenue", ascending=False)
 )
 
@@ -261,8 +294,8 @@ with category_col:
     fig.patch.set_facecolor("#0f172a")
     ax.set_facecolor("#0f172a")
     values = top_categories["revenue"].to_numpy()
-    colors = plt.cm.Blues_r(
-        [0.25 + (index / max(len(values) - 1, 1)) * 0.55 for index in range(len(values))]
+    colors = plt.cm.Blues(
+        np.linspace(0.45, 0.9, len(values))
     )
     ax.barh(top_categories["category"], values, color=colors)
     ax.invert_yaxis()
@@ -276,8 +309,81 @@ with category_col:
     st.pyplot(fig, width="stretch")
     plt.close(fig)
 
+st.markdown(
+    '<div class="section-title">Pertanyaan 3: Keterlambatan Pengiriman</div>',
+    unsafe_allow_html=True,
+)
+monthly_delay = delivery_analysis.groupby("month", as_index=False).agg(
+    total_orders=("order_id", "nunique"),
+    late_orders=("is_late", "sum"),
+)
+if not monthly_delay.empty:
+    monthly_delay["late_percentage"] = (
+        monthly_delay["late_orders"] / monthly_delay["total_orders"] * 100
+    )
+state_delay = delivery_analysis.groupby("customer_state", as_index=False).agg(
+    total_orders=("order_id", "nunique"),
+    late_orders=("is_late", "sum"),
+)
+if not state_delay.empty:
+    state_delay["late_percentage"] = (
+        state_delay["late_orders"] / state_delay["total_orders"] * 100
+    )
+qualified_states = state_delay[state_delay["total_orders"] >= 30].sort_values(
+    "late_percentage", ascending=False
+)
+
+delay_col, state_col = st.columns(2)
+with delay_col:
+    st.markdown(
+        '<div class="chart-title">Persentase Pesanan Terlambat per Bulan</div>',
+        unsafe_allow_html=True,
+    )
+    st.line_chart(
+        monthly_delay.set_index("month")[["late_percentage"]]
+        if not monthly_delay.empty
+        else pd.DataFrame(columns=["late_percentage"]),
+        y_label="Pesanan terlambat (%)",
+    )
+with state_col:
+    st.markdown(
+        '<div class="chart-title">State dengan Tingkat Keterlambatan Tertinggi</div>',
+        unsafe_allow_html=True,
+    )
+    state_plot = qualified_states.head(10).sort_values("late_percentage")
+    fig, ax = plt.subplots(figsize=(7, 4.7))
+    fig.patch.set_facecolor("#0f172a")
+    ax.set_facecolor("#0f172a")
+    state_colors = plt.cm.Oranges(
+        np.linspace(0.45, 0.9, len(state_plot))
+    )
+    ax.barh(
+        state_plot["customer_state"],
+        state_plot["late_percentage"],
+        color=state_colors,
+    )
+    ax.invert_yaxis()
+    ax.set_xlabel("Pesanan terlambat (%)", color="#f8fafc")
+    ax.set_ylabel("State pelanggan", color="#f8fafc")
+    ax.tick_params(axis="x", colors="#cbd5e1")
+    ax.tick_params(axis="y", colors="#cbd5e1")
+    ax.grid(axis="x", color="#334155", alpha=0.65)
+    ax.set_axisbelow(True)
+    for spine in ax.spines.values():
+        spine.set_color("#475569")
+    st.pyplot(fig, width="stretch")
+    plt.close(fig)
+
+review_summary = delivery_analysis.groupby("is_late")["review_score"].mean()
+highest_delay_state = (
+    qualified_states.iloc[0]["customer_state"] if not qualified_states.empty else "-"
+)
+highest_delay_rate = (
+    qualified_states.iloc[0]["late_percentage"] if not qualified_states.empty else 0
+)
+
 st.markdown('<div class="section-title">Insight Otomatis</div>', unsafe_allow_html=True)
-insight_1, insight_2, insight_3 = st.columns(3)
+insight_1, insight_2, insight_3, insight_4 = st.columns(4)
 best_category = category_sales.iloc[0] if not category_sales.empty else None
 best_month = monthly["revenue"].idxmax() if not monthly.empty else "-"
 with insight_1:
@@ -297,7 +403,14 @@ with insight_3:
     st.markdown(
         f'<div class="insight">🚚 <strong>Status pengiriman</strong><br>'
         f'{len(late_orders):,} pesanan terlambat<br>'
-        f'Dari {len(delivered_orders):,} pesanan yang telah terkirim</div>',
+        f'{late_rate:.2f}% dari pesanan ber-review</div>',
+        unsafe_allow_html=True,
+    )
+with insight_4:
+    st.markdown(
+        f'<div class="insight">📍 <strong>State prioritas</strong><br>'
+        f'{highest_delay_state}<br>'
+        f'{highest_delay_rate:.2f}% terlambat (min. 30 pesanan)</div>',
         unsafe_allow_html=True,
     )
 
@@ -308,6 +421,7 @@ display_categories = display_categories.rename(
     columns={
         "category": "Kategori",
         "revenue": "Total Penjualan",
+        "orders": "Jumlah Pesanan",
         "items": "Jumlah Item",
     }
 )
